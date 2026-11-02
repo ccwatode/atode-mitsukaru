@@ -1,0 +1,11 @@
+# 子どものデータ・写真・サンプルは絶対にコミットしない
+*.pdf
+*.jpg
+*.jpeg
+*.heic
+source/test/local/
+source/test/sample.test.ts
+source/test/e2e.py
+source/node_modules
+source/dist/
+source/src/cmaps.gen.ts

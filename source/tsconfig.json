@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "types": []
+  },
+  "include": [
+    "src/core",
+    "src/db.ts",
+    "src/importer.ts",
+    "src/save.ts",
+    "src/pdf.ts",
+    "src/media.ts",
+    "src/backupService.ts",
+    "src/types.d.ts"
+  ]
+}

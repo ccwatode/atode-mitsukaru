@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import { extractPieces } from '../src/core/extract.ts';
+import { parseNotebook } from '../src/core/parse.ts';
+const DIR = process.env.PDFJS_DIR ?? new URL('../node_modules/pdfjs-dist/', import.meta.url).pathname;
+const pdfjs = await import(DIR + 'legacy/build/pdf.mjs');
+const data = new Uint8Array(fs.readFileSync(process.argv[2]));
+const doc = await extractPieces(pdfjs, data, { cMapUrl: DIR + 'cmaps/', standardFontDataUrl: DIR + 'standard_fonts/' });
+const res = parseNotebook(doc);
+fs.writeFileSync(process.argv[3], JSON.stringify(res, null, 1));
+console.log('headings', res.headingCount, res.warnings);
+const c: Record<string, number> = {};
+for (const r of res.records) c[r.fetchStatus] = (c[r.fetchStatus] ?? 0) + 1;
+console.log(c);
+for (const r of res.records) console.log(r.date, r.fetchStatus.padEnd(4, '　'), r.statusReason);

@@ -1,0 +1,19 @@
+{
+  "name": "atode-mitsukaru",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "e2e": "python3 test/e2e.py"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "pdfjs-dist": "6.2.108",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "6.0.3"
+  }
+}
