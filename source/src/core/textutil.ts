@@ -40,7 +40,10 @@ export function findDateInText(text: string, base = new Date()): string | null {
 
 /** 貼り付けた文章からタイトル候補（最初の空でない行、40文字まで） */
 export function titleFromText(text: string): string {
-  const line = text.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? '';
+  const line = (text.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? '')
+    // 見出しの後ろに続く発行日（「【〇〇のお知らせ】2026年10月1日」）は外す
+    .replace(/[\s　]*(?:20\d{2}\s*[年/.-]\s*)?\d{1,2}\s*[月/.-]\s*\d{1,2}\s*日?(?:\s*[(（][^)）]{1,4}[)）])?\s*$/, '')
+    .trim();
   return line.length > 40 ? line.slice(0, 40) + '…' : line;
 }
 
@@ -104,4 +107,17 @@ export function exifDate(head: Uint8Array): string | null {
 export function newId(prefix: string): string {
   const r = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now().toString(36)}-${r}`;
+}
+
+/** PDFの文字片を行ごとの文章に戻す（文字が埋め込まれたPDFのみ。画像だけのPDFは空になる） */
+export function piecesToText(pieces: { str: string; x: number; y: number; h: number }[], limit = 20000): string {
+  const ps = pieces.filter((p) => p.str.trim()).sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines: { y: number; h: number; parts: { x: number; s: string }[] }[] = [];
+  for (const p of ps) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(p.y - last.y) < Math.max(2, Math.min(p.h, last.h) * 0.5)) last.parts.push({ x: p.x, s: p.str });
+    else lines.push({ y: p.y, h: p.h, parts: [{ x: p.x, s: p.str }] });
+  }
+  const text = lines.map((l) => l.parts.sort((a, b) => a.x - b.x).map((x) => x.s).join(' ').replace(/\s+/g, ' ').trim()).join('\n');
+  return text.length > limit ? text.slice(0, limit) : text;
 }

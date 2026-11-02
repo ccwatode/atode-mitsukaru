@@ -17,6 +17,8 @@ export interface ProcessedFile {
   blobs: BlobRow[];
   /** 画面のプレビュー用 */
   thumbUrl?: string;
+  /** PDFに埋め込まれた文字（検索・予定の取り出し用）。画像だけのPDFや読み取り失敗時は空 */
+  text?: string;
 }
 
 function loadImage(file: Blob): Promise<HTMLImageElement> {
@@ -94,6 +96,14 @@ export async function processPdf(file: File): Promise<ProcessedFile> {
   const blobs: BlobRow[] = [{ key: `${id}:orig`, mime: 'application/pdf', size: file.size, blob: file }];
   const variants: AttachmentRef['variants'] = ['orig'];
   let thumbUrl: string | undefined;
+  let text = '';
+  try {
+    const { extractFromPdf } = await import('./pdf.ts');
+    const { piecesToText } = await import('./core/textutil.ts');
+    text = piecesToText((await extractFromPdf(new Uint8Array(await file.arrayBuffer()))).pieces);
+  } catch {
+    /* 文字なしで続行 */
+  }
   try {
     const { renderPdfFirstPage } = await import('./pdf.ts');
     const canvas = await renderPdfFirstPage(new Uint8Array(await file.arrayBuffer()), THUMB_MAX);
@@ -104,7 +114,7 @@ export async function processPdf(file: File): Promise<ProcessedFile> {
   } catch {
     /* サムネイルなしで続行 */
   }
-  return { ref: { id, name: file.name, mime: 'application/pdf', size: file.size, variants }, blobs, thumbUrl };
+  return { ref: { id, name: file.name, mime: 'application/pdf', size: file.size, variants }, blobs, thumbUrl, text };
 }
 
 export const processFile = (f: File, keepOriginal: boolean) =>

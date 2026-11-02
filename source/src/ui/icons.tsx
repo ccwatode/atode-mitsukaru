@@ -131,3 +131,27 @@ export const IconShield = (p: P) => (
     <path d="m9 12 2 2 4-4" />
   </S>
 );
+export const IconCalendar = (p: P) => (
+  <S {...p}>
+    <rect x="3.5" y="5" width="17" height="15.5" rx="2.5" />
+    <path d="M3.5 10h17M8 3v4M16 3v4" />
+  </S>
+);
+export const IconClock = (p: P) => (
+  <S {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5V12l3 2" />
+  </S>
+);
+export const IconPin = (p: P) => (
+  <S {...p}>
+    <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z" />
+    <circle cx="12" cy="10" r="2.3" />
+  </S>
+);
+export const IconExternal = (p: P) => (
+  <S {...p}>
+    <path d="M14 4h6v6M20 4l-9 9" />
+    <path d="M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10" />
+  </S>
+);

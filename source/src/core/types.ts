@@ -153,3 +153,58 @@ export interface Item {
   createdAt: string;
   updatedAt: string;
 }
+
+/* ===================== v3：予定 ===================== */
+
+export type EventCategory = 'event' | 'deadline' | 'prepare' | 'closed' | 'lunch' | 'backup' | 'other';
+
+export const CATEGORY_LABELS: Record<EventCategory, string> = {
+  event: '行事',
+  deadline: '提出・締切',
+  prepare: '持ち物・準備',
+  closed: '休園',
+  lunch: '給食',
+  backup: '予備日',
+  other: 'その他',
+};
+
+/** 予定の元になった記録 */
+export interface EventSource {
+  type: 'item' | 'note' | 'manual';
+  /** item.id / note.id（manual は空） */
+  id: string;
+  /** 元の文章のうち、この予定の根拠になった部分 */
+  snippet: string;
+}
+
+export interface EventChange {
+  at: string;
+  /** 「日付：10月12日 → 10月19日」のような説明 */
+  changes: string[];
+  /** 変更のきっかけになった記録（お知らせの再取り込みなど） */
+  sourceId?: string;
+}
+
+export interface CalEvent {
+  id: string;
+  title: string;
+  /** 開始日 YYYY-MM-DD */
+  date: string;
+  /** 終了日（複数日の場合のみ） YYYY-MM-DD */
+  endDate: string;
+  /** 開始・終了時刻 HH:MM。空なら終日 */
+  start: string;
+  end: string;
+  location: string;
+  description: string;
+  childName: string;
+  category: EventCategory;
+  status: 'active' | 'cancelled';
+  source: EventSource;
+  history: EventChange[];
+  /** 外部カレンダーに書き出した日時と、その時点の版（変更検知用） */
+  exportedAt: string;
+  sequence: number;
+  createdAt: string;
+  updatedAt: string;
+}

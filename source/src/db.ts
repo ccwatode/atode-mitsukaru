@@ -1,4 +1,4 @@
-import type { Item, NoteRecord } from './core/types.ts';
+import type { CalEvent, Item, NoteRecord } from './core/types.ts';
 import type { PendingUpdate } from './core/merge.ts';
 
 /** 取り込んだPDFファイルの記録 */
@@ -30,11 +30,12 @@ const DB_NAME = 'atode-mitsukaru';
 /**
  * v1：records / files / pending（MVP）
  * v2：items / blobs / meta を追加。既存ストアには触れない（データ移行なし）
+ * v3：events（予定）を追加。既存ストアには触れない
  */
-const DB_VERSION = 2;
-type StoreName = 'records' | 'files' | 'pending' | 'items' | 'blobs' | 'meta';
-const ALL: StoreName[] = ['records', 'files', 'pending', 'items', 'blobs', 'meta'];
-const KEY: Record<StoreName, string> = { records: 'id', files: 'hash', pending: 'id', items: 'id', blobs: 'key', meta: 'key' };
+const DB_VERSION = 3;
+type StoreName = 'records' | 'files' | 'pending' | 'items' | 'blobs' | 'meta' | 'events';
+const ALL: StoreName[] = ['records', 'files', 'pending', 'items', 'blobs', 'meta', 'events'];
+const KEY: Record<StoreName, string> = { records: 'id', files: 'hash', pending: 'id', items: 'id', blobs: 'key', meta: 'key', events: 'id' };
 
 /** IndexedDBが使えない環境ではメモリ上に保存し、その旨を表示する */
 let memory: Record<StoreName, Map<string, unknown>> | null = null;
@@ -201,6 +202,12 @@ export async function getMeta<T>(key: string): Promise<T | undefined> {
   return (await getOne<MetaRow>('meta', key))?.value as T | undefined;
 }
 export const setMeta = (key: string, value: unknown) => write([{ store: 'meta', put: [{ key, value }] }]);
+
+/* ---------- v3：予定 ---------- */
+
+export const getEvents = () => getAll<CalEvent>('events');
+export const putEvents = (es: CalEvent[]) => write([{ store: 'events', put: es }]);
+export const deleteEvent = (id: string) => write([{ store: 'events', del: [id] }]);
 
 /* ---------- 全体 ---------- */
 

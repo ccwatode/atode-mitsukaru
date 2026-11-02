@@ -49,3 +49,32 @@ export async function readClipboard(): Promise<string | null> {
     return null;
   }
 }
+
+/** iPhone・iPad（iPadOSはMacと名乗るためタッチ対応で判定） */
+export const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+
+/**
+ * 予定ファイル（.ics）を開く。
+ * iPhoneのSafariは text/calendar を開くと「カレンダーに追加」の画面を出すため、ダウンロードではなく開く。
+ * それ以外の環境ではファイルとしてダウンロードし、カレンダーアプリで開いてもらう。
+ */
+export function openCalendarFile(name: string, ics: string): 'opened' | 'started' {
+  const file = new File([ics], name, { type: 'text/calendar' });
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url;
+  const forceDownload = (() => {
+    try {
+      return localStorage.getItem('icsMode') === 'download';
+    } catch {
+      return false;
+    }
+  })();
+  if (!isIOS() || forceDownload) a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  return a.download ? 'started' : 'opened';
+}

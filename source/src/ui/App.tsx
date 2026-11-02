@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AttachmentRef, FetchStatus, Item, ItemKind, NoteRecord } from '../core/types.ts';
+import type { AttachmentRef, CalEvent, FetchStatus, Item, ItemKind, NoteRecord } from '../core/types.ts';
+import { EDITABLE_FIELDS } from '../core/types.ts';
+import { applyCandidate, cancelEvent, editEvent, extractCandidates, googleCalendarUrl, matchCandidate, newEventFromCandidate, toICS, type ExportContext } from '../core/schedule.ts';
+import { CalendarView, EventDetail, EventForm, initialAction, ReviewView, SourceEvents, UpcomingCard, type ReviewRow, type SourceRef } from './Calendar.tsx';
 import { KIND_LABELS } from '../core/types.ts';
 import { applyPending, type PendingUpdate } from '../core/merge.ts';
 import { toCSV, toJSON } from '../core/exportData.ts';
@@ -9,25 +12,43 @@ import * as db from '../db.ts';
 import { importJson, importPdf, type ImportReport } from '../importer.ts';
 import { createBackup, restoreBackup, type BackupResult, type RestoreReport } from '../backupService.ts';
 import { processFile, type ProcessedFile } from '../media.ts';
-import { readClipboard, saveFile, textFile } from '../save.ts';
+import { openCalendarFile, readClipboard, saveFile, textFile } from '../save.ts';
 import { daysSince, formatBytes, formatDate, formatDateTime, Modal } from './common.tsx';
 import { AddSheet, ItemForm, type AddChoice, type Draft } from './AddFlow.tsx';
 import { DataView } from './DataView.tsx';
 import { buildEntries, childrenOf, eventsOf, matchChild, type Entry } from './entries.ts';
-import { IconBack, IconGear, IconHome, IconPhoto, IconPlus, IconSearch } from './icons.tsx';
+import { IconBack, IconCalendar, IconGear, IconHome, IconPhoto, IconPlus } from './icons.tsx';
 import { ItemDetail, Photos, Viewer } from './ItemView.tsx';
 import { Detail, PendingView } from './note.tsx';
 import { SearchView, type SearchState } from './SearchView.tsx';
 import { Timeline, type KindFilter } from './Timeline.tsx';
 
-type Tab = 'home' | 'search' | 'photos' | 'data';
-type View = { tab: Tab; screen?: 'note' | 'item' | 'form' | 'pending'; id?: string; draft?: Draft; autoPaste?: boolean };
+type Tab = 'home' | 'search' | 'calendar' | 'photos' | 'data';
+type View = {
+  tab: Tab;
+  screen?: 'note' | 'item' | 'form' | 'pending' | 'event' | 'eventForm' | 'review';
+  id?: string;
+  draft?: Draft;
+  autoPaste?: boolean;
+  evDraft?: { event: CalEvent; isNew: boolean };
+  review?: { source: SourceRef; rows: ReviewRow[] };
+};
 
-const TAB_TITLE: Record<Tab, string> = { home: 'あとで見つかる', search: '検索', photos: '写真・チラシ', data: 'データ' };
+const TAB_TITLE: Record<Tab, string> = { home: 'あとで見つかる', search: '検索', calendar: '予定', photos: '写真・チラシ', data: 'データ' };
+const APP_URL = typeof location !== 'undefined' ? location.origin + location.pathname : '';
+
+/** 予定を取り出す対象の文章 */
+const itemText = (it: Item) => [it.title, it.body, it.searchText].filter(Boolean).join('\n');
+const noteText = (r: NoteRecord) => EDITABLE_FIELDS.map((f) => (r as unknown as Record<string, string>)[f]).filter(Boolean).join('\n');
+const itemSource = (it: Item): SourceRef => ({ type: 'item', id: it.id, kind: it.kind, title: it.title, date: it.date, text: itemText(it), childName: it.childName });
+const noteSource = (r: NoteRecord): SourceRef => ({ type: 'note', id: r.id, kind: 'note', title: `連絡帳 ${r.date}`, date: r.date, text: noteText(r), childName: r.childName });
 
 export function App() {
   const [records, setRecords] = useState<NoteRecord[]>([]);
   const [items, setItems] = useState<Item[]>([]);
+  const [calEvents, setCalEvents] = useState<CalEvent[]>([]);
+  const [calMonth, setCalMonth] = useState(() => ({ y: new Date().getFullYear(), m: new Date().getMonth() + 1 }));
+  const [calSel, setCalSel] = useState(todayStr());
   const [pending, setPending] = useState<PendingUpdate[]>([]);
   const [files, setFiles] = useState<db.FileEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -60,9 +81,10 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null);
 
   const reload = useCallback(async () => {
-    const [rs, its, ps, fs, persistent, lb, ko, ch] = await Promise.all([
+    const [rs, its, evs, ps, fs, persistent, lb, ko, ch] = await Promise.all([
       db.getRecords(),
       db.getItems(),
+      db.getEvents(),
       db.getPending(),
       db.getFiles(),
       db.isPersistentStorage(),
@@ -73,6 +95,7 @@ export function App() {
     rs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.id.localeCompare(b.id)));
     setRecords(rs);
     setItems(its);
+    setCalEvents(evs);
     setPending(ps);
     setFiles(fs);
     setMemoryOnly(!persistent);
@@ -89,6 +112,16 @@ export function App() {
     window.addEventListener('app-updated', onUpd);
     return () => window.removeEventListener('app-updated', onUpd);
   }, [reload]);
+
+  // 予定へのリンク（#e=予定ID）。カレンダーの予定の説明から開いた場合など
+  useEffect(() => {
+    if (!loaded) return;
+    const m = /^#e=([\w-]+)$/.exec(location.hash);
+    if (m && calEvents.some((e) => e.id === m[1])) {
+      setStack([{ tab: 'calendar' }, { tab: 'calendar', screen: 'event', id: m[1] }]);
+      history.replaceState(null, '', location.pathname);
+    }
+  }, [loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!toast) return;
@@ -108,6 +141,8 @@ export function App() {
   const docs = useMemo(() => [...records.map(noteToDoc), ...items.map(itemToDoc)], [records, items]);
   const recById = useMemo(() => new Map(records.map((r) => [r.id, r])), [records]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const eventById = useMemo(() => new Map(calEvents.map((e) => [e.id, e])), [calEvents]);
+  const visibleEvents = useMemo(() => calEvents.filter((e) => !child || !e.childName || e.childName === child), [calEvents, child]);
   const notesShown = entries.filter((e) => e.note);
   const unfetched = notesShown.filter((e) => e.note!.fetchStatus === '未取得').length;
   const attachmentCount = items.reduce((s, i) => s + i.attachments.length, 0);
@@ -116,6 +151,79 @@ export function App() {
   const goTab = (tab: Tab) => setStack([{ tab }]);
   const back = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   const openEntry = (e: Entry) => go({ tab: view.tab, screen: e.kind === 'note' ? 'note' : 'item', id: e.id });
+
+  /* ---------- 予定 ---------- */
+
+  const sourceOfEvent = (e: CalEvent): SourceRef | null => {
+    if (e.source.type === 'item') {
+      const it = itemById.get(e.source.id);
+      return it ? itemSource(it) : null;
+    }
+    if (e.source.type === 'note') {
+      const r = recById.get(e.source.id);
+      return r ? noteSource(r) : null;
+    }
+    return null;
+  };
+  const exportCtx: ExportContext = { sourceTitle: (e) => sourceOfEvent(e)?.title ?? '', appUrl: APP_URL };
+
+  const candidateRows = (src: SourceRef): ReviewRow[] =>
+    extractCandidates(src.text, src.date, src.type === 'item' ? src.title : '').map((c, i) => {
+      const match = matchCandidate(c, calEvents);
+      return { key: `r${i}`, c, match, action: initialAction(c, match) };
+    });
+  const pendingCandidates = (src: SourceRef) => candidateRows(src).filter((r) => r.match.status !== 'same').length;
+  const linkedEvents = (id: string) => calEvents.filter((e) => e.source.id === id).sort((a, b) => a.date.localeCompare(b.date));
+  const openReview = (src: SourceRef) => go({ tab: view.tab, screen: 'review', review: { source: src, rows: candidateRows(src) } });
+
+  const blankEvent = (patch: Partial<CalEvent> = {}): CalEvent => {
+    const now = new Date().toISOString();
+    return {
+      id: newId('ev'), title: '', date: calSel || todayStr(), endDate: '', start: '', end: '', location: '', description: '', childName: child, category: 'event', status: 'active',
+      source: { type: 'manual', id: '', snippet: '' }, history: [], exportedAt: '', sequence: 0, createdAt: now, updatedAt: now, ...patch,
+    };
+  };
+
+  const register = async (rows: ReviewRow[], childName: string, src: SourceRef) => {
+    const now = new Date().toISOString();
+    const puts: CalEvent[] = [];
+    for (const r of rows) {
+      const snippet = r.c.snippet.slice(0, 300);
+      if (r.action === 'add') puts.push(newEventFromCandidate(r.c, { type: src.type, id: src.id, snippet }, childName, newId('ev'), now));
+      else if (r.action === 'update' && r.match.status === 'changed') puts.push(applyCandidate(r.match.event, r.c, now, src.id));
+      else if (r.action === 'cancel' && r.match.status === 'cancel') puts.push(cancelEvent(r.match.event, now, src.id));
+    }
+    await db.putEvents(puts);
+    await reload();
+    back();
+    setToast(`予定を${puts.length}件反映しました`);
+  };
+
+  const saveEvent = async (e: CalEvent, isNew: boolean) => {
+    const now = new Date().toISOString();
+    const prev = eventById.get(e.id);
+    const next = isNew || !prev ? { ...e, createdAt: now, updatedAt: now } : editEvent(prev, e, now);
+    await db.putEvents([next]);
+    await reload();
+    setCalSel(next.date);
+    setCalMonth({ y: Number(next.date.slice(0, 4)), m: Number(next.date.slice(5, 7)) });
+    setToast(isNew ? '予定を登録しました' : '保存しました');
+    go({ tab: view.tab, screen: 'event', id: next.id }, true);
+  };
+
+  const markExported = async (es: CalEvent[]) => {
+    const now = new Date().toISOString();
+    await db.putEvents(es.map((e) => ({ ...e, exportedAt: now })));
+    await reload();
+  };
+
+  const exportIcs = async (es: CalEvent[]) => {
+    const ics = toICS(es, new Date(), exportCtx);
+    const name = es.length === 1 ? `予定_${es[0].date}.ics` : `予定_${es.length}件_${todayStr()}.ics`;
+    const r = openCalendarFile(name, ics);
+    await markExported(es);
+    setToast(r === 'opened' ? 'カレンダーの画面で「追加」を押してください' : '予定ファイル（.ics）を保存しました。開くとカレンダーに追加できます');
+  };
 
   /* ---------- 追加 ---------- */
 
@@ -163,6 +271,7 @@ export function App() {
         {
           date: (kind === 'photo' && dates[0]) || todayStr(),
           title: kind === 'flyer' ? titleFromFileName(list[0].name) : '',
+          searchText: processed.map((p) => p.text ?? '').filter(Boolean).join('\n\n'),
           source: { via: kind === 'photo' ? 'photo' : 'file', fileNames: list.map((f) => f.name) },
         },
         processed,
@@ -264,6 +373,11 @@ export function App() {
   /* ---------- 画面 ---------- */
 
   const backupDays = daysSince(lastBackupAt);
+  const today = todayStr();
+  const soon = visibleEvents
+    .filter((e) => e.status === 'active' && (e.endDate || e.date) >= today)
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.start || '').localeCompare(b.start || ''))
+    .slice(0, 3);
   const banners: ReactNode = (
     <>
       {updated && (
@@ -289,6 +403,7 @@ export function App() {
           <span>iPhoneの故障や機種変更に備えて、ファイルに保存しておきましょう</span>
         </button>
       )}
+      <UpcomingCard events={soon} onOpen={(e) => go({ tab: 'home', screen: 'event', id: e.id })} onAll={() => goTab('calendar')} />
     </>
   );
 
@@ -303,7 +418,12 @@ export function App() {
     const idx = list.indexOf(view.id!);
     title = '連絡帳';
     content = r ? (
-      <Detail record={r} newerId={list[idx - 1]} olderId={list[idx + 1]} onOpen={(id) => go({ ...view, id }, true)} onSave={async (n) => (await db.putRecords([n]), await reload(), setToast('保存しました'))} />
+      <>
+        <Detail record={r} newerId={list[idx - 1]} olderId={list[idx + 1]} onOpen={(id) => go({ ...view, id }, true)} onSave={async (n) => (await db.putRecords([n]), await reload(), setToast('保存しました'))} />
+        {r.fetchStatus !== '未取得' && (
+          <SourceEvents linked={linkedEvents(r.id)} pendingCount={pendingCandidates(noteSource(r))} onExtract={() => openReview(noteSource(r))} onOpen={(e) => go({ tab: view.tab, screen: 'event', id: e.id })} />
+        )}
+      </>
     ) : (
       <p className="empty">記録が見つかりません。</p>
     );
@@ -311,6 +431,7 @@ export function App() {
     const it = itemById.get(view.id!);
     title = it ? KIND_LABELS[it.kind] : '記録';
     content = it ? (
+      <>
       <ItemDetail
         item={it}
         onEdit={() => go({ tab: view.tab, screen: 'form', draft: { item: it, newFiles: [], isNew: false } })}
@@ -322,12 +443,61 @@ export function App() {
         }}
         onEvent={(ev) => {
           setSq({ q: ev, from: '', to: '', kind: 'all' });
-          setStack([{ tab: 'search' }]);
+          go({ tab: 'search' });
         }}
         onView={(atts, index) => setViewer({ atts, index })}
       />
+      {it.kind !== 'photo' && (
+        <SourceEvents linked={linkedEvents(it.id)} pendingCount={pendingCandidates(itemSource(it))} onExtract={() => openReview(itemSource(it))} onOpen={(e) => go({ tab: view.tab, screen: 'event', id: e.id })} />
+      )}
+      </>
     ) : (
       <p className="empty">記録が見つかりません。</p>
+    );
+  } else if (view.screen === 'event') {
+    const e = eventById.get(view.id!);
+    title = '予定';
+    content = e ? (
+      <EventDetail
+        e={e}
+        source={sourceOfEvent(e)}
+        sourceTitle={(id) => itemById.get(id)?.title ?? (recById.get(id) ? `連絡帳 ${recById.get(id)!.date}` : undefined)}
+        googleUrl={googleCalendarUrl(e, exportCtx)}
+        onOpenSource={() => e.source.type !== 'manual' && go({ tab: view.tab, screen: e.source.type, id: e.source.id })}
+        onEdit={() => go({ tab: view.tab, screen: 'eventForm', evDraft: { event: e, isNew: false } })}
+        onToggleCancel={async () => {
+          const now = new Date().toISOString();
+          await db.putEvents([e.status === 'cancelled' ? editEvent(e, { ...e, status: 'active' }, now) : cancelEvent(e, now)]);
+          await reload();
+          setToast(e.status === 'cancelled' ? '中止を取り消しました' : '中止にしました');
+        }}
+        onDelete={async () => {
+          await db.deleteEvent(e.id);
+          await reload();
+          back();
+          setToast('予定を削除しました');
+        }}
+        onIcs={() => void exportIcs([e])}
+        onGoogle={() => void markExported([e])}
+      />
+    ) : (
+      <p className="empty">予定が見つかりません。</p>
+    );
+  } else if (view.screen === 'eventForm' && view.evDraft) {
+    title = view.evDraft.isNew ? '予定を追加' : '予定の編集';
+    content = <EventForm event={view.evDraft.event} isNew={view.evDraft.isNew} children={children} onSave={(e) => void saveEvent(e, view.evDraft!.isNew)} onCancel={back} />;
+  } else if (view.screen === 'review' && view.review) {
+    const src = view.review.source;
+    title = '予定の候補';
+    content = (
+      <ReviewView
+        source={src}
+        rows={view.review.rows}
+        children={children}
+        onRegister={(rows, ch) => void register(rows, ch, src)}
+        onManual={() => go({ tab: view.tab, screen: 'eventForm', evDraft: { event: blankEvent({ date: src.date, childName: src.childName, source: { type: src.type, id: src.id, snippet: '' } }), isNew: true } }, true)}
+        onCancel={back}
+      />
     );
   } else if (view.screen === 'form' && view.draft) {
     title = view.draft.isNew ? `${KIND_LABELS[view.draft.item.kind]}を追加` : '編集';
@@ -340,9 +510,22 @@ export function App() {
         onFilter={setFilter}
         onOpen={openEntry}
         onAdd={() => setSheet(true)}
-        onSearch={() => goTab('search')}
+        onSearch={() => go({ tab: 'search' })}
         banners={banners}
         counts={{ note: notesShown.length, unfetched }}
+      />
+    );
+  } else if (view.tab === 'calendar') {
+    content = (
+      <CalendarView
+        events={visibleEvents}
+        month={calMonth}
+        onMonth={setCalMonth}
+        selected={calSel}
+        onSelect={setCalSel}
+        onOpen={(e) => go({ tab: 'calendar', screen: 'event', id: e.id })}
+        onAdd={(date) => go({ tab: 'calendar', screen: 'eventForm', evDraft: { event: blankEvent({ date }), isNew: true } })}
+        onExportMany={(es) => void exportIcs(es)}
       />
     );
   } else if (view.tab === 'search') {
@@ -431,7 +614,7 @@ export function App() {
 
       <nav className="tabbar" aria-label="画面の切り替え">
         {tabBtn('home', <IconHome />, 'ホーム')}
-        {tabBtn('search', <IconSearch />, '検索')}
+        {tabBtn('calendar', <IconCalendar />, '予定')}
         <button className="tab tab-add" onClick={() => setSheet(true)} aria-label="追加">
           <span className="tab-add-circle">
             <IconPlus size={26} />
@@ -480,7 +663,7 @@ export function App() {
       {backupReady && (
         <Modal title="バックアップを作成しました" onClose={() => setBackupReady(null)}>
           <p>
-            連絡帳{backupReady.counts.records}日分・記録{backupReady.counts.items}件・添付{backupReady.counts.attachments}件・PDF{backupReady.counts.pdfs}件（{formatBytes(backupReady.size)}）
+            連絡帳{backupReady.counts.records}日分・記録{backupReady.counts.items}件・添付{backupReady.counts.attachments}件・PDF{backupReady.counts.pdfs}件・予定{backupReady.counts.events ?? 0}件（{formatBytes(backupReady.size)}）
           </p>
           <p className="small muted">次の画面で「ファイルに保存」→ iCloud Drive などを選んでください。</p>
           <div className="actions">
@@ -500,6 +683,7 @@ export function App() {
           <ul className="report">
             <li>連絡帳：追加 {restoreReport.notesAdded}日／変更なし {restoreReport.notesUnchanged}日{restoreReport.notesPending ? `／内容が違う ${restoreReport.notesPending}日（確認待ち）` : ''}</li>
             <li>お知らせ・チラシ・写真：追加 {restoreReport.itemsAdded}件／同じ {restoreReport.itemsSame}件</li>
+            <li>予定：追加 {restoreReport.eventsAdded}件／同じ {restoreReport.eventsSame}件{restoreReport.eventsKeptExisting.length ? `／内容が違う ${restoreReport.eventsKeptExisting.length}件（今の内容を残しました）` : ''}</li>
             <li>添付：{restoreReport.attachmentsAdded}件、元PDF：{restoreReport.pdfsAdded}件</li>
           </ul>
           {restoreReport.itemsKeptExisting.length > 0 && (
@@ -513,7 +697,7 @@ export function App() {
 
       {confirmDelete && (
         <Modal title="すべて削除しますか？" onClose={() => setConfirmDelete(false)}>
-          <p>連絡帳{records.length}日分、記録{items.length}件、画像・PDFをこの端末から削除します。元に戻せません。必要ならバックアップしてから削除してください。</p>
+          <p>連絡帳{records.length}日分、記録{items.length}件、予定{calEvents.length}件、画像・PDFをこの端末から削除します。元に戻せません。必要ならバックアップしてから削除してください。</p>
           <div className="actions">
             <button className="btn" onClick={() => setConfirmDelete(false)}>
               やめる
