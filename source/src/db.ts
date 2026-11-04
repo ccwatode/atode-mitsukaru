@@ -1,4 +1,4 @@
-import type { CalEvent, Item, NoteRecord } from './core/types.ts';
+import type { CalEvent, Child, Family, Item, NoteRecord } from './core/types.ts';
 import type { PendingUpdate } from './core/merge.ts';
 
 /** 取り込んだPDFファイルの記録 */
@@ -208,6 +208,12 @@ export const setMeta = (key: string, value: unknown) => write([{ store: 'meta', 
 export const getEvents = () => getAll<CalEvent>('events');
 export const putEvents = (es: CalEvent[]) => write([{ store: 'events', put: es }]);
 export const deleteEvent = (id: string) => write([{ store: 'events', del: [id] }]);
+
+/* ---------- v0.5：家族と子ども（meta に保存。データベースの版は上げない） ---------- */
+
+export const getFamily = () => getMeta<Family>('family');
+export const getChildren = async () => (await getMeta<Child[]>('children')) ?? [];
+export const getSchemaVersion = async () => (await getMeta<number>('schemaVersion')) ?? 0;
 
 /* ---------- 全体 ---------- */
 

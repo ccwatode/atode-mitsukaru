@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { FileEntry } from '../db.ts';
+import type { Child } from '../core/types.ts';
 import { daysSince, formatBytes, formatDateTime, StatusBadge } from './common.tsx';
 import { IconDownload, IconFolder, IconShield, IconUpload } from './icons.tsx';
 
@@ -18,6 +19,10 @@ export function DataView(props: {
   onImportJson: () => void;
   onPersist: () => void;
   onDeleteAll: () => void;
+  kids: Child[];
+  kidUsage: (id: string) => number;
+  onRenameChild: (id: string, name: string) => void;
+  onMergeChild: (keepId: string, mergeId: string) => void;
 }) {
   const [includePdfs, setIncludePdfs] = useState(true);
   const days = daysSince(props.lastBackupAt);
@@ -55,7 +60,22 @@ export function DataView(props: {
           <input type="checkbox" checked={props.keepOriginal} onChange={(e) => props.onKeepOriginal(e.target.checked)} />
           <span>原本（元のファイル）も保存する</span>
         </label>
-        <p className="small muted">オフ（おすすめ）：長辺2560pxの表示用とサムネイルだけを保存します。チラシの文字も読める画質で、容量は写真1枚あたり約0.5〜1MB。オンにすると元のファイルも残り、1枚あたり数MB増えます。</p>
+        <p className="small muted">長辺2560px以下の画像（はいチーズ！から保存した写真など）は、この設定にかかわらず、元のファイルをそのまま保存します。</p>
+        <p className="small muted">それより大きい写真：オフ（おすすめ）なら長辺2560pxの表示用とサムネイルだけを保存します。容量は1枚あたり約0.5〜1MB。オンにすると元のファイルも残り、1枚あたり数MB増えます。</p>
+      </section>
+
+      <section className="card">
+        <h2 className="card-title">子ども</h2>
+        {props.kids.length === 0 ? (
+          <p className="small muted">まだ登録されていません。連絡帳やお知らせに子どもの名前が入ると、自動で追加されます。</p>
+        ) : (
+          <ul className="kid-list">
+            {props.kids.map((k) => (
+              <KidRow key={k.id} kid={k} others={props.kids.filter((o) => o.id !== k.id)} usage={props.kidUsage(k.id)} onRename={props.onRenameChild} onMerge={props.onMergeChild} />
+            ))}
+          </ul>
+        )}
+        <p className="small muted">同じ子どもが別の書き方（ひらがな・漢字など）で2人になっている場合は、「まとめる」で1人にできます。記録と予定の紐づけも付け替わります。</p>
       </section>
 
       <section className="card">
@@ -142,5 +162,35 @@ export function DataView(props: {
         </button>
       </section>
     </div>
+  );
+}
+
+function KidRow(props: { kid: Child; others: Child[]; usage: number; onRename: (id: string, name: string) => void; onMerge: (keepId: string, mergeId: string) => void }) {
+  const k = props.kid;
+  const [name, setName] = useState(k.displayName);
+  const [target, setTarget] = useState('');
+  return (
+    <li className="kid-row">
+      <label className="field">
+        <span>表示名</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== k.displayName && props.onRename(k.id, name)} />
+      </label>
+      <p className="small muted">記録上の表記：{k.aliases.join('、')}／紐づいた記録・予定 {props.usage}件</p>
+      {props.others.length > 0 && (
+        <div className="kid-merge">
+          <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={`${k.displayName}にまとめる子ども`}>
+            <option value="">同じ子どもを選ぶ…</option>
+            {props.others.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.displayName}
+              </option>
+            ))}
+          </select>
+          <button className="btn btn-small" disabled={!target} onClick={() => (props.onMerge(k.id, target), setTarget(''))}>
+            まとめる
+          </button>
+        </div>
+      )}
+    </li>
   );
 }

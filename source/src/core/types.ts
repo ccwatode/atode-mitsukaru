@@ -132,6 +132,21 @@ export interface AttachmentRef {
   variants: ('orig' | 'view' | 'thumb')[];
   /** 写真の撮影日時（EXIF）。分かれば */
   takenAt?: string;
+  /* ---- v0.5 で追加（すべて省略可。旧版は無視する） ---- */
+  /** 保存した本体の SHA-256（重複判定） */
+  hash?: string;
+  /** 写真か、資料（PDF・資料画像）か */
+  role?: 'photo' | 'document';
+  /** PDFから取り出した文字（検索・予定抽出） */
+  text?: string;
+  pages?: number;
+  /** 元サービス上の表示名・表示容量（例：「献立表夕食11月号.pdf」「180.8KB」） */
+  displayName?: string;
+  displaySize?: string;
+  /** 出どころ：単体で保存／一覧PDFから同一ファイル／一覧PDFから形式変換／一覧PDFから縮小版 */
+  provenance?: 'single' | 'listpdf-identical' | 'listpdf-recoded' | 'listpdf-downscaled';
+  /** 保存状態。missing＝元サービスにあるが未保存（名前と容量だけ分かっている） */
+  state?: 'saved' | 'missing';
 }
 
 export interface Item {
@@ -149,9 +164,67 @@ export interface Item {
   /** 行事名（運動会など）。同じ行事の記録を束ねる */
   event: string;
   attachments: AttachmentRef[];
-  source: { via: 'file' | 'photo' | 'paste' | 'restore'; fileNames: string[] };
+  source: {
+    via: 'file' | 'photo' | 'paste' | 'restore' | 'bulk' | 'listpdf';
+    fileNames: string[];
+    /** v0.5：取り込み元のサービス（例 'haicheese'） */
+    service?: string;
+    /** v0.5：重複判定用のキー（掲載日＋タイトル＋本文冒頭から作る） */
+    externalKey?: string;
+  };
   createdAt: string;
   updatedAt: string;
+  /* ---- v0.5 で追加（すべて省略可。旧版は無視する） ---- */
+  /** 保護者向けの区分（複数可） */
+  purposes?: Purpose[];
+  /** 元サービス側の区分 */
+  origin?: Origin;
+  /** 取り込んだ日時（date は掲載日として扱う） */
+  importedAt?: string;
+  /** 子どもID。空＝家族全体 */
+  childIds?: string[];
+  /** 未整理／整理済み */
+  status?: 'inbox' | 'filed';
+  important?: boolean;
+  /** 本文の取得状態 */
+  bodyState?: 'full' | 'truncated' | 'unknown';
+  /** このお知らせが訂正している元のお知らせのID */
+  revisionOf?: string;
+  /** 変更の履歴 */
+  history?: { at: string; by: string; fields: string[] }[];
+  familyId?: string;
+  createdBy?: string;
+  /** 更新のたびに +1（将来の同期で競合を見つけるため） */
+  rev?: number;
+}
+
+/** v0.5：保護者向けの区分（D4） */
+export type Purpose = 'memories' | 'schedule' | 'documents' | 'daily';
+export const PURPOSE_LABELS: Record<Purpose, string> = {
+  memories: '思い出・成長記録',
+  schedule: '予定・重要通知',
+  documents: '資料',
+  daily: '日々の記録',
+};
+/** v0.5：元サービス側の区分 */
+export type Origin = 'oshirase' | 'renrakucho' | 'manual';
+export const ORIGIN_LABELS: Record<Origin, string> = { oshirase: 'お知らせ', renrakucho: '連絡帳', manual: '手入力' };
+
+/** v0.5：家族と子ども（meta に保存） */
+export interface Family {
+  id: string;
+  name: string;
+  /** この端末の利用者ID */
+  deviceUserId: string;
+  createdAt: string;
+}
+export interface Child {
+  id: string;
+  /** 画面に出す名前 */
+  displayName: string;
+  /** 記録上の表記（連絡帳の園児名、お知らせの札の名前など） */
+  aliases: string[];
+  createdAt: string;
 }
 
 /* ===================== v3：予定 ===================== */
@@ -207,4 +280,8 @@ export interface CalEvent {
   sequence: number;
   createdAt: string;
   updatedAt: string;
+  /* ---- v0.5 で追加（省略可） ---- */
+  childIds?: string[];
+  familyId?: string;
+  rev?: number;
 }

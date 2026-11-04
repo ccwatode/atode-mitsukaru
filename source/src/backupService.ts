@@ -13,7 +13,7 @@ const stamp = (d: Date) =>
 /** 端末内の全データ（連絡帳・お知らせ・チラシ・写真・元PDF）をZIPにまとめる */
 export async function createBackup(includePdfs: boolean, onStep: (s: string) => void): Promise<BackupResult> {
   onStep('記録を集めています');
-  const [records, items, events, files, blobKeys] = await Promise.all([db.getRecords(), db.getItems(), db.getEvents(), db.getFiles(), db.getBlobKeys()]);
+  const [records, items, events, files, blobKeys, family, children] = await Promise.all([db.getRecords(), db.getItems(), db.getEvents(), db.getFiles(), db.getBlobKeys(), db.getFamily(), db.getChildren()]);
   const needed = new Set(items.flatMap((i) => i.attachments.flatMap((a) => a.variants.map((v) => `${a.id}:${v}`))));
   const blobs: BlobEntry[] = [];
   let n = 0;
@@ -33,6 +33,8 @@ export async function createBackup(includePdfs: boolean, onStep: (s: string) => 
     records,
     items,
     events,
+    family,
+    children,
     files: files.map(({ hash, name, size, importedAt, recordCount }) => ({ hash, name, size, importedAt, recordCount })),
     blobs,
     pdfs,
@@ -53,6 +55,7 @@ export interface RestoreReport {
   eventsAdded: number;
   eventsSame: number;
   eventsKeptExisting: string[];
+  childrenAdded: number;
   attachmentsAdded: number;
   pdfsAdded: number;
 }
@@ -61,15 +64,22 @@ export interface RestoreReport {
 export async function restoreBackup(file: File, onStep: (s: string) => void): Promise<RestoreReport> {
   onStep('バックアップを読み込んでいます');
   const b = await unpackBackup(new Uint8Array(await file.arrayBuffer()));
-  const [records, items, events, files] = await Promise.all([db.getRecords(), db.getItems(), db.getEvents(), db.getFiles()]);
+  const [records, items, events, files, children, family] = await Promise.all([db.getRecords(), db.getItems(), db.getEvents(), db.getFiles(), db.getChildren(), db.getFamily()]);
   const now = new Date().toISOString();
-  const plan = planRestore(b, { records, items, events, fileHashes: new Set(files.map((f) => f.hash)) }, now);
+  const plan = planRestore(b, { records, items, events, children, fileHashes: new Set(files.map((f) => f.hash)) }, now);
   onStep('保存しています');
   const pdfByHash = new Map(plan.pdfsToAdd.map((p) => [p.hash, p.data]));
   await db.write([
     { store: 'blobs', put: plan.blobsToAdd.map((x) => ({ key: x.key, mime: x.mime, size: x.data.length, blob: new Blob([x.data as BlobPart], { type: x.mime }) })) },
     { store: 'items', put: plan.itemsToAdd.map((i) => ({ ...i, source: i.source ?? { via: 'restore', fileNames: [] } })) },
     { store: 'events', put: plan.eventsToAdd },
+    {
+      store: 'meta',
+      put: [
+        ...(plan.childrenToAdd.length ? [{ key: 'children', value: [...children, ...plan.childrenToAdd] }] : []),
+        ...(!family && b.family ? [{ key: 'family', value: b.family }] : []),
+      ],
+    },
     { store: 'records', put: [...plan.notes.added, ...plan.notes.touched] },
     { store: 'pending', put: plan.notes.pending },
     {
@@ -89,6 +99,7 @@ export async function restoreBackup(file: File, onStep: (s: string) => void): Pr
     itemsSame: plan.itemsSame,
     itemsKeptExisting: plan.itemsKeptExisting.map((i) => i.title || i.date),
     eventsAdded: plan.eventsToAdd.length,
+    childrenAdded: plan.childrenToAdd.length,
     eventsSame: plan.eventsSame,
     eventsKeptExisting: plan.eventsKeptExisting.map((e) => `${e.date} ${e.title}`),
     attachmentsAdded: new Set(plan.blobsToAdd.map((x) => x.key.split(':')[0])).size,

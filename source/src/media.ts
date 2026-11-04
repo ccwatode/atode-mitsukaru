@@ -57,6 +57,16 @@ function toJpeg(img: HTMLImageElement | HTMLCanvasElement, w: number, h: number,
   );
 }
 
+/** ファイルの中身の SHA-256（重複判定用）。計算できない環境では undefined */
+export async function sha256(b: Blob): Promise<string | undefined> {
+  try {
+    const d = await crypto.subtle.digest('SHA-256', await b.arrayBuffer());
+    return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return undefined;
+  }
+}
+
 export async function processImage(file: File, keepOriginal: boolean): Promise<ProcessedFile> {
   const id = newId('at');
   const head = new Uint8Array(await file.slice(0, 128 * 1024).arrayBuffer());
@@ -70,11 +80,17 @@ export async function processImage(file: File, keepOriginal: boolean): Promise<P
     const img = await loadImage(file);
     width = img.naturalWidth;
     height = img.naturalHeight;
-    const view = await toJpeg(img, width, height, VIEW_MAX, 0.85);
     const thumb = await toJpeg(img, width, height, THUMB_MAX, 0.75);
-    blobs.push({ key: `${id}:view`, mime: 'image/jpeg', size: view.blob.size, blob: view.blob });
+    // D2：表示用の大きさ以下の画像（はいチーズ！の配信画像は約800×600）は、圧縮し直さずそのまま保存する
+    if (Math.max(width, height) <= VIEW_MAX && /^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+      keepOriginal = true;
+    } else {
+      const view = await toJpeg(img, width, height, VIEW_MAX, 0.85);
+      blobs.push({ key: `${id}:view`, mime: 'image/jpeg', size: view.blob.size, blob: view.blob });
+      variants.push('view');
+    }
     blobs.push({ key: `${id}:thumb`, mime: 'image/jpeg', size: thumb.blob.size, blob: thumb.blob });
-    variants.push('view', 'thumb');
+    variants.push('thumb');
     thumbUrl = URL.createObjectURL(thumb.blob);
   } catch {
     // 表示できない形式は原本だけ保存する
@@ -85,7 +101,7 @@ export async function processImage(file: File, keepOriginal: boolean): Promise<P
     variants.push('orig');
   }
   return {
-    ref: { id, name: file.name, mime: file.type || 'application/octet-stream', size: file.size, width, height, variants, takenAt },
+    ref: { id, name: file.name, mime: file.type || 'application/octet-stream', size: file.size, width, height, variants, takenAt, hash: await sha256(file), provenance: 'single', state: 'saved' },
     blobs,
     thumbUrl,
   };
@@ -114,7 +130,7 @@ export async function processPdf(file: File): Promise<ProcessedFile> {
   } catch {
     /* サムネイルなしで続行 */
   }
-  return { ref: { id, name: file.name, mime: 'application/pdf', size: file.size, variants }, blobs, thumbUrl, text };
+  return { ref: { id, name: file.name, mime: 'application/pdf', size: file.size, variants, hash: await sha256(file), provenance: 'single', state: 'saved', role: 'document', text: text || undefined }, blobs, thumbUrl, text };
 }
 
 export const processFile = (f: File, keepOriginal: boolean) =>

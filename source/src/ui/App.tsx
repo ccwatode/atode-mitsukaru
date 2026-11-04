@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AttachmentRef, CalEvent, FetchStatus, Item, ItemKind, NoteRecord } from '../core/types.ts';
+import type { AttachmentRef, CalEvent, Child, Family, FetchStatus, Item, ItemKind, NoteRecord } from '../core/types.ts';
+import { mergeChildren, migrate, SCHEMA_VERSION } from '../core/migrate.ts';
 import { EDITABLE_FIELDS } from '../core/types.ts';
 import { applyCandidate, cancelEvent, editEvent, extractCandidates, googleCalendarUrl, matchCandidate, newEventFromCandidate, toICS, type ExportContext } from '../core/schedule.ts';
 import { CalendarView, EventDetail, EventForm, initialAction, ReviewView, SourceEvents, UpcomingCard, type ReviewRow, type SourceRef } from './Calendar.tsx';
@@ -47,6 +48,11 @@ export function App() {
   const [records, setRecords] = useState<NoteRecord[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [calEvents, setCalEvents] = useState<CalEvent[]>([]);
+  const [family, setFamily] = useState<Family | undefined>();
+  const [kids, setKids] = useState<Child[]>([]);
+  const [schemaVersion, setSchemaVersion] = useState<number | null>(null);
+  const [migrationPrompt, setMigrationPrompt] = useState(false);
+  const [migrateAfterBackup, setMigrateAfterBackup] = useState(false);
   const [calMonth, setCalMonth] = useState(() => ({ y: new Date().getFullYear(), m: new Date().getMonth() + 1 }));
   const [calSel, setCalSel] = useState(todayStr());
   const [pending, setPending] = useState<PendingUpdate[]>([]);
@@ -81,7 +87,7 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null);
 
   const reload = useCallback(async () => {
-    const [rs, its, evs, ps, fs, persistent, lb, ko, ch] = await Promise.all([
+    const [rs, its, evs, ps, fs, persistent, lb, ko, ch, fam, kidList, sv] = await Promise.all([
       db.getRecords(),
       db.getItems(),
       db.getEvents(),
@@ -91,7 +97,13 @@ export function App() {
       db.getMeta<string>('lastBackupAt'),
       db.getMeta<boolean>('keepOriginal'),
       db.getMeta<string>('child'),
+      db.getFamily(),
+      db.getChildren(),
+      db.getSchemaVersion(),
     ]);
+    setFamily(fam);
+    setKids(kidList);
+    setSchemaVersion(sv);
     rs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.id.localeCompare(b.id)));
     setRecords(rs);
     setItems(its);
@@ -152,6 +164,71 @@ export function App() {
   const back = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   const openEntry = (e: Entry) => go({ tab: view.tab, screen: e.kind === 'note' ? 'note' : 'item', id: e.id });
 
+  /* ---------- v0.5：移行（D3：版を上げず項目を足すだけ。何度実行しても同じ結果） ---------- */
+
+  const uuid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : newId('id'));
+
+  const runMigration = useCallback(async (quiet = false) => {
+    const [rs, its, evs, fam, kidList] = await Promise.all([db.getRecords(), db.getItems(), db.getEvents(), db.getFamily(), db.getChildren()]);
+    const r = migrate({ records: rs, items: its, events: evs, family: fam, children: kidList }, uuid, new Date().toISOString());
+    await db.write([
+      { store: 'items', put: r.items },
+      { store: 'events', put: r.events },
+      {
+        store: 'meta',
+        put: [
+          { key: 'family', value: r.family },
+          { key: 'children', value: r.children },
+          { key: 'schemaVersion', value: SCHEMA_VERSION },
+          ...(fam ? [] : [{ key: 'migratedAt', value: new Date().toISOString() }]),
+        ],
+      },
+    ]);
+    await reload();
+    if (!quiet) setToast('データの形式を更新しました（今までの記録はそのままです）');
+  }, [reload]);
+
+  // 初回起動：データがなければそのまま、あれば先にバックアップを案内する
+  useEffect(() => {
+    if (!loaded || schemaVersion == null || schemaVersion >= SCHEMA_VERSION || migrationPrompt) return;
+    if (!records.length && !items.length && !calEvents.length) void runMigration(true);
+    else setMigrationPrompt(true);
+  }, [loaded, schemaVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** 保存する記録・予定に v0.5 の項目（子どもID・分類・家族・版番号）を付ける。childIds は名前から付け直す */
+  const withV5 = async (its: Item[], evs: CalEvent[]): Promise<{ items: Item[]; events: CalEvent[] }> => {
+    const r = migrate(
+      { records: [], items: its.map((i) => ({ ...i, childIds: undefined })), events: evs.map((e) => ({ ...e, childIds: undefined })), family, children: kids },
+      uuid,
+      new Date().toISOString(),
+    );
+    if (r.report.childrenAdded || !family) {
+      await db.write([{ store: 'meta', put: [{ key: 'children', value: r.children }, ...(family ? [] : [{ key: 'family', value: r.family }])] }]);
+    }
+    const pick = <T extends { id: string }>(xs: T[], done: T[]) => xs.map((x) => done.find((d) => d.id === x.id) ?? x);
+    return { items: pick(its, r.items), events: pick(evs, r.events) };
+  };
+
+  const renameChild = async (id: string, name: string) => {
+    const next = kids.map((c) => (c.id === id && name.trim() ? { ...c, displayName: name.trim(), aliases: c.aliases.includes(name.trim()) ? c.aliases : [...c.aliases, name.trim()] } : c));
+    await db.setMeta('children', next);
+    setKids(next);
+  };
+
+  /** 別表記の子どもをまとめる。記録・予定の子どもIDも付け替える */
+  const mergeChild = async (keepId: string, mergeId: string) => {
+    const next = mergeChildren(kids, keepId, mergeId);
+    const fix = <T extends { childIds?: string[]; rev?: number }>(x: T): T | null =>
+      x.childIds?.includes(mergeId) ? { ...x, childIds: [...new Set(x.childIds.map((c) => (c === mergeId ? keepId : c)))], rev: (x.rev ?? 1) + 1 } : null;
+    await db.write([
+      { store: 'meta', put: [{ key: 'children', value: next }] },
+      { store: 'items', put: items.map(fix).filter(Boolean) as Item[] },
+      { store: 'events', put: calEvents.map(fix).filter(Boolean) as CalEvent[] },
+    ]);
+    await reload();
+    setToast('同じ子どもとしてまとめました');
+  };
+
   /* ---------- 予定 ---------- */
 
   const sourceOfEvent = (e: CalEvent): SourceRef | null => {
@@ -193,7 +270,7 @@ export function App() {
       else if (r.action === 'update' && r.match.status === 'changed') puts.push(applyCandidate(r.match.event, r.c, now, src.id));
       else if (r.action === 'cancel' && r.match.status === 'cancel') puts.push(cancelEvent(r.match.event, now, src.id));
     }
-    await db.putEvents(puts);
+    await db.putEvents((await withV5([], puts.map((p) => (p.createdAt === now ? p : { ...p, rev: (p.rev ?? 1) + 1 })))).events);
     await reload();
     back();
     setToast(`予定を${puts.length}件反映しました`);
@@ -202,7 +279,8 @@ export function App() {
   const saveEvent = async (e: CalEvent, isNew: boolean) => {
     const now = new Date().toISOString();
     const prev = eventById.get(e.id);
-    const next = isNew || !prev ? { ...e, createdAt: now, updatedAt: now } : editEvent(prev, e, now);
+    const edited = isNew || !prev ? { ...e, createdAt: now, updatedAt: now } : { ...editEvent(prev, e, now), rev: (prev.rev ?? 1) + 1 };
+    const next = (await withV5([], [edited])).events[0];
     await db.putEvents([next]);
     await reload();
     setCalSel(next.date);
@@ -280,7 +358,9 @@ export function App() {
   };
 
   const saveItem = async (item: Item, newFiles: ProcessedFile[], removed: AttachmentRef[]) => {
-    await db.saveItem(item, newFiles.flatMap((f) => f.blobs));
+    const prev = itemById.get(item.id);
+    const stamped = (await withV5([prev ? { ...item, rev: (prev.rev ?? 1) + 1, updatedAt: new Date().toISOString() } : item], [])).items[0];
+    await db.saveItem(stamped, newFiles.flatMap((f) => f.blobs));
     if (removed.length) await db.write([{ store: 'blobs', del: removed.flatMap((a) => a.variants.map((v) => `${a.id}:${v}`)) }]);
     await reload();
     setToast('保存しました');
@@ -340,6 +420,10 @@ export function App() {
       setLastBackupAt(now);
       setBackupReady(null);
       setToast(r === 'saved' ? 'バックアップを保存しました' : 'バックアップのダウンロードを開始しました');
+      if (migrateAfterBackup) {
+        setMigrateAfterBackup(false);
+        await runMigration();
+      }
     } else if (r === 'declined') setToast('保存をキャンセルしました');
     else setToast('保存できませんでした');
   };
@@ -349,7 +433,7 @@ export function App() {
     setError(null);
     try {
       setRestoreReport(await restoreBackup(f, setBusy));
-      await reload();
+      await runMigration(true);
     } catch (e) {
       setError(`復元できませんでした：${(e as Error).message}`);
     } finally {
@@ -553,6 +637,10 @@ export function App() {
           setToast(ok ? '永続保存が許可されました' : 'このブラウザでは許可されませんでした');
         }}
         onDeleteAll={() => setConfirmDelete(true)}
+        kids={kids}
+        kidUsage={(id) => items.filter((i) => i.childIds?.includes(id)).length + calEvents.filter((e) => e.childIds?.includes(id)).length}
+        onRenameChild={(id, name) => void renameChild(id, name)}
+        onMergeChild={(a, b) => void mergeChild(a, b)}
       />
     );
   }
@@ -631,7 +719,7 @@ export function App() {
         if (!fs[0]) return;
         try {
           setReports([await importJson(fs[0], records)]);
-          await reload();
+          await runMigration(true);
         } catch (e) {
           setError(`読み込めませんでした：${(e as Error).message}`);
         }
@@ -661,13 +749,13 @@ export function App() {
       {reports && <ImportReportModal reports={reports} onClose={() => setReports(null)} onPending={() => (setReports(null), go({ tab: view.tab, screen: 'pending' }))} onHome={() => (setReports(null), setFilter('note'), goTab('home'))} />}
 
       {backupReady && (
-        <Modal title="バックアップを作成しました" onClose={() => setBackupReady(null)}>
+        <Modal title="バックアップを作成しました" onClose={() => (setBackupReady(null), migrateAfterBackup && (setMigrateAfterBackup(false), setMigrationPrompt(true)))}>
           <p>
             連絡帳{backupReady.counts.records}日分・記録{backupReady.counts.items}件・添付{backupReady.counts.attachments}件・PDF{backupReady.counts.pdfs}件・予定{backupReady.counts.events ?? 0}件（{formatBytes(backupReady.size)}）
           </p>
           <p className="small muted">次の画面で「ファイルに保存」→ iCloud Drive などを選んでください。</p>
           <div className="actions">
-            <button className="btn" onClick={() => setBackupReady(null)}>
+            <button className="btn" onClick={() => (setBackupReady(null), migrateAfterBackup && (setMigrateAfterBackup(false), setMigrationPrompt(true)))}>
               やめる
             </button>
             <button className="btn btn-primary" onClick={() => void saveBackup()}>
@@ -683,6 +771,7 @@ export function App() {
           <ul className="report">
             <li>連絡帳：追加 {restoreReport.notesAdded}日／変更なし {restoreReport.notesUnchanged}日{restoreReport.notesPending ? `／内容が違う ${restoreReport.notesPending}日（確認待ち）` : ''}</li>
             <li>お知らせ・チラシ・写真：追加 {restoreReport.itemsAdded}件／同じ {restoreReport.itemsSame}件</li>
+            {restoreReport.childrenAdded > 0 && <li>子ども：追加 {restoreReport.childrenAdded}人</li>}
             <li>予定：追加 {restoreReport.eventsAdded}件／同じ {restoreReport.eventsSame}件{restoreReport.eventsKeptExisting.length ? `／内容が違う ${restoreReport.eventsKeptExisting.length}件（今の内容を残しました）` : ''}</li>
             <li>添付：{restoreReport.attachmentsAdded}件、元PDF：{restoreReport.pdfsAdded}件</li>
           </ul>
@@ -692,6 +781,28 @@ export function App() {
           <button className="btn btn-primary btn-block" onClick={() => (setRestoreReport(null), goTab('home'))}>
             ホームで確認
           </button>
+        </Modal>
+      )}
+
+      {migrationPrompt && !backupReady && !busy && (
+        <Modal title="データの形式を更新します">
+          <p>お知らせの分類（思い出・予定・資料・日々の記録）や、子どもごとの整理ができるように、記録に項目を足します。</p>
+          <p className="small muted">今の連絡帳・お知らせ・写真・予定は消えず、書き換えもしません。前の版のアプリでもそのまま開けます。念のため、先にバックアップを保存しておくと安心です。</p>
+          <div className="btn-col">
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setMigrationPrompt(false);
+                setMigrateAfterBackup(true);
+                void doBackup(true);
+              }}
+            >
+              バックアップを保存してから更新
+            </button>
+            <button className="btn" onClick={() => (setMigrationPrompt(false), void runMigration())}>
+              このまま更新
+            </button>
+          </div>
         </Modal>
       )}
 

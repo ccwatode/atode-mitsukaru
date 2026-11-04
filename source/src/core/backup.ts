@@ -1,7 +1,8 @@
 import { buildZip, readZip, type ZipEntry } from './zip.ts';
 import { fromJSON, EXPORT_APP } from './exportData.ts';
 import { planMerge, type MergePlan } from './merge.ts';
-import type { CalEvent, Item, NoteRecord } from './types.ts';
+import type { CalEvent, Child, Family, Item, NoteRecord } from './types.ts';
+import { findChild } from './migrate.ts';
 
 /**
  * 完全バックアップ（ZIP）。JSONだけでは画像が入らないため、
@@ -10,6 +11,11 @@ import type { CalEvent, Item, NoteRecord } from './types.ts';
 
 /** v2：連絡帳・記録・添付・元PDF　v3：予定（events.json）を追加。v2 も読める */
 export const BACKUP_VERSION = 3;
+/**
+ * v0.5（D3）：形式の版は 3 のまま、family.json / children.json と記録の新しい項目を足すだけ。
+ * v0.4 は知らないファイルと項目を無視するので、v0.5 で作ったバックアップも v0.4 で復元できる。
+ */
+export const FORMAT_REVISION = 5;
 
 export interface FileMeta {
   hash: string;
@@ -35,6 +41,8 @@ export interface BackupData {
   records: NoteRecord[];
   items: Item[];
   events?: CalEvent[];
+  family?: Family;
+  children?: Child[];
   files: FileMeta[];
   blobs: BlobEntry[];
   pdfs: PdfEntry[];
@@ -43,6 +51,7 @@ export interface BackupData {
 export interface BackupManifest {
   app: typeof EXPORT_APP;
   version: number;
+  formatRevision?: number;
   createdAt: string;
   counts: { records: number; items: number; attachments: number; pdfs: number; events?: number };
   blobs: { key: string; mime: string; path: string; size: number }[];
@@ -60,6 +69,7 @@ export function packBackup(d: BackupData, now: string): { parts: Uint8Array[]; m
   const manifest: BackupManifest = {
     app: EXPORT_APP,
     version: BACKUP_VERSION,
+    formatRevision: FORMAT_REVISION,
     createdAt: now,
     counts: { records: d.records.length, items: d.items.length, attachments: new Set(d.blobs.map((b) => b.key.split(':')[0])).size, pdfs: d.pdfs.length, events: (d.events ?? []).length },
     blobs,
@@ -71,6 +81,8 @@ export function packBackup(d: BackupData, now: string): { parts: Uint8Array[]; m
     { name: 'records.json', data: json({ app: EXPORT_APP, version: 1, exportedAt: now, records: d.records }) },
     { name: 'items.json', data: json(d.items) },
     { name: 'events.json', data: json(d.events ?? []) },
+    ...(d.family ? [{ name: 'family.json', data: json(d.family) }] : []),
+    ...(d.children ? [{ name: 'children.json', data: json(d.children) }] : []),
     { name: 'files.json', data: json(d.files) },
     ...d.blobs.map((b, i) => ({ name: blobs[i].path, data: b.data })),
     ...d.pdfs.map((p, i) => ({ name: pdfs[i].path, data: p.data })),
@@ -135,6 +147,10 @@ export async function unpackBackup(buf: Uint8Array): Promise<BackupData & { mani
   const items = itemsRaw ? validateItems(JSON.parse(dec.decode(itemsRaw))) : [];
   const eventsRaw = byName.get('events.json');
   const events = eventsRaw ? validateEvents(JSON.parse(dec.decode(eventsRaw))) : [];
+  const famRaw = byName.get('family.json');
+  const family = famRaw ? (JSON.parse(dec.decode(famRaw)) as Family) : undefined;
+  const chRaw = byName.get('children.json');
+  const children = chRaw ? (JSON.parse(dec.decode(chRaw)) as Child[]).filter((c) => typeof c?.id === 'string' && Array.isArray(c.aliases)) : undefined;
   const filesRaw = byName.get('files.json');
   const files = filesRaw ? (JSON.parse(dec.decode(filesRaw)) as FileMeta[]) : [];
   const blobs: BlobEntry[] = manifest.blobs.map((b) => {
@@ -146,7 +162,7 @@ export async function unpackBackup(buf: Uint8Array): Promise<BackupData & { mani
     const data = byName.get(p.path);
     return data ? [{ hash: p.hash, data }] : [];
   });
-  return { manifest, records, items, events, files, blobs, pdfs };
+  return { manifest, records, items, events, family, children, files, blobs, pdfs };
 }
 
 export interface RestorePlan {
@@ -158,12 +174,21 @@ export interface RestorePlan {
   eventsToAdd: CalEvent[];
   eventsSame: number;
   eventsKeptExisting: CalEvent[];
+  /** バックアップ側にしかいない子ども（名前で照合） */
+  childrenToAdd: Child[];
   blobsToAdd: BlobEntry[];
   filesToAdd: FileMeta[];
   pdfsToAdd: PdfEntry[];
 }
 
-const stable = (it: Item | CalEvent) => JSON.stringify({ ...it, source: undefined, updatedAt: undefined, createdAt: undefined });
+/**
+ * 「同じ内容か」の比較。v0.5 で足した項目（分類・状態・子どもID・版番号など）は比べない。
+ * v0.4 のバックアップを v0.5 の端末に戻したとき、移行で足した項目だけの違いを「内容が違う」としないため。
+ */
+const stable = (x: Item | CalEvent) =>
+  'kind' in x
+    ? JSON.stringify([x.kind, x.date, x.title, x.body, x.searchText, x.childName, x.event, x.attachments.map((a) => a.id)])
+    : JSON.stringify([x.title, x.date, x.endDate, x.start, x.end, x.location, x.description, x.childName, x.category, x.status]);
 
 /**
  * 復元の計画。既存データは消さない・上書きしない。
@@ -173,17 +198,31 @@ const stable = (it: Item | CalEvent) => JSON.stringify({ ...it, source: undefine
  */
 export function planRestore(
   b: BackupData,
-  existing: { records: NoteRecord[]; items: Item[]; events?: CalEvent[]; fileHashes: Set<string> },
+  existing: { records: NoteRecord[]; items: Item[]; events?: CalEvent[]; children?: Child[]; fileHashes: Set<string> },
   now: string,
 ): RestorePlan {
   const notes = planMerge(b.records, new Map(existing.records.map((r) => [r.id, r])), now);
+  // 子ども：名前（表記）で照合し、バックアップ側のIDを端末側のIDに読み替える
+  const devChildren = [...(existing.children ?? [])];
+  const childrenToAdd: Child[] = [];
+  const idMap = new Map<string, string>();
+  for (const c of b.children ?? []) {
+    const hit = [c.displayName, ...c.aliases].map((n) => findChild(devChildren, n)).find(Boolean);
+    if (hit) idMap.set(c.id, hit.id);
+    else {
+      devChildren.push(c);
+      childrenToAdd.push(c);
+      idMap.set(c.id, c.id);
+    }
+  }
+  const remap = <T extends { childIds?: string[] }>(x: T): T => (x.childIds ? { ...x, childIds: x.childIds.map((id) => idMap.get(id) ?? id) } : x);
   const cur = new Map(existing.items.map((i) => [i.id, i]));
   const itemsToAdd: Item[] = [];
   const itemsKeptExisting: Item[] = [];
   let itemsSame = 0;
   for (const it of b.items) {
     const c = cur.get(it.id);
-    if (!c) itemsToAdd.push(it);
+    if (!c) itemsToAdd.push(remap(it));
     else if (stable(c) === stable(it)) itemsSame++;
     else itemsKeptExisting.push(it);
   }
@@ -193,7 +232,7 @@ export function planRestore(
   let eventsSame = 0;
   for (const e of b.events ?? []) {
     const c = curE.get(e.id);
-    if (!c) eventsToAdd.push(e);
+    if (!c) eventsToAdd.push(remap(e));
     else if (stable(c) === stable(e)) eventsSame++;
     else eventsKeptExisting.push(e);
   }
@@ -202,5 +241,5 @@ export function planRestore(
   const filesToAdd = b.files.filter((f) => !existing.fileHashes.has(f.hash));
   const fileSet = new Set(filesToAdd.map((f) => f.hash));
   const pdfsToAdd = b.pdfs.filter((p) => fileSet.has(p.hash));
-  return { notes, itemsToAdd, itemsSame, itemsKeptExisting, eventsToAdd, eventsSame, eventsKeptExisting, blobsToAdd, filesToAdd, pdfsToAdd };
+  return { notes, itemsToAdd, itemsSame, itemsKeptExisting, eventsToAdd, eventsSame, eventsKeptExisting, childrenToAdd, blobsToAdd, filesToAdd, pdfsToAdd };
 }
