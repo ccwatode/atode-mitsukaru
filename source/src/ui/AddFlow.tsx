@@ -6,13 +6,14 @@ import { readClipboard } from '../save.ts';
 import { formatBytes, KindIcon, Modal, Thumb } from './common.tsx';
 import { IconBook, IconClipboard, IconClose, IconDoc, IconMegaphone, IconNote, IconPhoto, IconPlus } from './icons.tsx';
 
-export type AddChoice = 'notePdf' | 'paste' | 'flyer' | 'photo' | 'memo';
+export type AddChoice = 'listPdf' | 'notePdf' | 'paste' | 'flyer' | 'photo' | 'memo';
 
-export function AddSheet({ onChoose, onClose }: { onChoose: (c: AddChoice) => void; onClose: () => void }) {
+export function AddSheet({ onChoose, onClose, coverage }: { onChoose: (c: AddChoice) => void; onClose: () => void; coverage?: string }) {
   const opts: { c: AddChoice; icon: JSX.Element; title: string; sub: string }[] = [
+    { c: 'listPdf', icon: <IconMegaphone />, title: 'お知らせ一覧のPDF', sub: coverage ? `まとめて取り込み。${coverage}` : 'Safariで保存した一覧をまとめて取り込み' },
     { c: 'photo', icon: <IconPhoto />, title: '写真', sub: '写真ライブラリから複数まとめて' },
     { c: 'flyer', icon: <IconDoc />, title: 'チラシ・配布資料', sub: 'スクリーンショット・写真・PDF' },
-    { c: 'paste', icon: <IconMegaphone />, title: 'お知らせの文章', sub: 'コピーした文章を貼り付け' },
+    { c: 'paste', icon: <IconClipboard />, title: 'お知らせの文章', sub: 'コピーした文章を貼り付け' },
     { c: 'notePdf', icon: <IconBook />, title: '連絡帳PDF', sub: '複数のPDFもまとめて選べます' },
     { c: 'memo', icon: <IconNote />, title: 'メモ', sub: '持ち物・予定などを自分で書く' },
   ];
@@ -29,6 +30,16 @@ export function AddSheet({ onChoose, onClose }: { onChoose: (c: AddChoice) => vo
           </button>
         ))}
       </div>
+      <details className="fold add-help">
+        <summary>お知らせ一覧のPDFの作り方</summary>
+        <ol className="small">
+          <li>Safariで、はいチーズ！ノートの「お知らせ」を開く</li>
+          <li>取り込みたい日付まで、下へスクロールして読み込む（全文がほしい記事は「もっとみる」を開いておく）</li>
+          <li>共有ボタン →「オプション」→「PDF」を選んで戻る</li>
+          <li>「"ファイル"に保存」→ このアプリで「お知らせ一覧のPDF」から選ぶ</li>
+        </ol>
+        <p className="small muted">取り込み済みの記事は重複しません。添付のPDFは、あとから追加できます。</p>
+      </details>
       <button className="btn btn-block" onClick={onClose}>
         やめる
       </button>

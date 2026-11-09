@@ -81,6 +81,17 @@ export function KindLabel({ kind }: { kind: EntryKind }) {
   );
 }
 
+/** ジャンルの札。色は名前から決める（同じ名前はいつも同じ色） */
+export function GenreTag({ name }: { name: string }) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)!) % 997;
+  return (
+    <span className="genre-tag" style={{ ['--g' as string]: `var(--g${h % 6})` }}>
+      {name}
+    </span>
+  );
+}
+
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose?: () => void }) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === 'Escape' && onClose?.();

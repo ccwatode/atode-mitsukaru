@@ -1,4 +1,5 @@
 import type { ExtractedDoc, TextPiece } from './types.ts';
+import { fixRadicals } from './textutil.ts';
 
 /**
  * PDF.jsのテキスト抽出で文字片と座標を取り出す。
@@ -29,7 +30,7 @@ export async function extractPieces(pdfjs: any, data: Uint8Array, opts: { cMapUr
         if (typeof it.str !== 'string' || it.str.trim() === '') continue;
         const [, , c, d, e, f] = it.transform;
         const h = it.height || Math.hypot(c, d);
-        pieces.push({ str: it.str, x: e, y: offset + (vp.height - f), w: it.width, h, page: p });
+        pieces.push({ str: fixRadicals(it.str), x: e, y: offset + (vp.height - f), w: it.width, h, page: p });
       }
       offset += vp.height;
       pageHeights.push(vp.height);

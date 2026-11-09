@@ -1,11 +1,14 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { KIND_LABELS, type EntryKind } from '../core/types.ts';
-import { dayParts, KindIcon, preview, StatusBadge, Thumb } from './common.tsx';
+import { dayParts, GenreTag, KindIcon, preview, StatusBadge, Thumb } from './common.tsx';
 import { IconAlert, IconChevron, IconPlus, IconSearch, IconShield } from './icons.tsx';
 import type { Entry } from './entries.ts';
 
-export type KindFilter = 'all' | EntryKind;
-const FILTERS: KindFilter[] = ['all', 'note', 'notice', 'flyer', 'photo', 'memo'];
+/** 'all'／種類（連絡帳・ジャンルのない記録）／'g:ジャンル名' */
+export type KindFilter = 'all' | EntryKind | `g:${string}`;
+const KINDS: EntryKind[] = ['note', 'notice', 'flyer', 'photo', 'memo'];
+
+export const matchFilter = (e: Entry, f: KindFilter) => f === 'all' || (f.startsWith('g:') ? e.item?.genre === f.slice(2) : e.kind === f && !e.item?.genre);
 
 type Row = { type: 'entry'; e: Entry } | { type: 'unfetched'; list: Entry[] };
 
@@ -23,13 +26,14 @@ function EntryRow({ e, onOpen }: { e: Entry; onOpen: (e: Entry) => void }) {
     const it = e.item!;
     title = it.title || KIND_LABELS[it.kind];
     sub = preview(it.body || it.searchText || (it.event ? `行事：${it.event}` : ''), 70);
-    if (it.attachments.length) {
+    const saved = it.attachments.filter((a) => a.state !== 'missing');
+    if (saved.length) {
       extra = (
         <span className="strip">
-          {it.attachments.slice(0, 3).map((a) => (
+          {saved.slice(0, 3).map((a) => (
             <Thumb key={a.id} att={a} className="thumb-s" />
           ))}
-          {it.attachments.length > 3 && <span className="strip-more">+{it.attachments.length - 3}</span>}
+          {saved.length > 3 && <span className="strip-more">+{saved.length - 3}</span>}
         </span>
       );
     }
@@ -44,7 +48,8 @@ function EntryRow({ e, onOpen }: { e: Entry; onOpen: (e: Entry) => void }) {
         <span className="entry-title">
           <KindIcon kind={e.kind} size={15} />
           <span className="entry-title-text">{title}</span>
-          {e.childName && <span className="entry-child">{e.childName}</span>}
+          {e.item?.genre && <GenreTag name={e.item.genre} />}
+          {e.childName && !e.item?.genre && <span className="entry-child">{e.childName}</span>}
         </span>
         {sub && <span className="entry-sub">{sub}</span>}
         {extra}
@@ -90,7 +95,18 @@ export function Timeline(props: {
   banners: ReactNode;
   counts: { note: number; unfetched: number };
 }) {
-  const shown = props.filter === 'all' ? props.entries : props.entries.filter((e) => e.kind === props.filter);
+  const shown = props.entries.filter((e) => matchFilter(e, props.filter));
+  // 絞り込みのボタン：連絡帳 → ジャンル（多い順）→ ジャンルのない記録の種類
+  const filters = useMemo(() => {
+    const g = new Map<string, number>();
+    const k = new Set<EntryKind>();
+    for (const e of props.entries) {
+      if (e.item?.genre) g.set(e.item.genre, (g.get(e.item.genre) ?? 0) + 1);
+      else k.add(e.kind);
+    }
+    const genres = [...g.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => `g:${name}` as KindFilter);
+    return ['all' as KindFilter, ...KINDS.filter((x) => x === 'note' && k.has(x)), ...genres, ...KINDS.filter((x) => x !== 'note' && k.has(x))];
+  }, [props.entries]);
   const months = useMemo(() => {
     const m = new Map<string, Row[]>();
     for (const e of shown) {
@@ -114,9 +130,9 @@ export function Timeline(props: {
       </button>
       {props.banners}
       <div className="chips chips-scroll" role="group" aria-label="種類で絞り込み">
-        {FILTERS.map((f) => (
+        {filters.map((f) => (
           <button key={f} className={`chip ${props.filter === f ? 'on' : ''}`} aria-pressed={props.filter === f} onClick={() => props.onFilter(f)}>
-            {f === 'all' ? 'すべて' : KIND_LABELS[f]}
+            {f === 'all' ? 'すべて' : f.startsWith('g:') ? f.slice(2) : KIND_LABELS[f as EntryKind]}
           </button>
         ))}
       </div>
@@ -143,7 +159,7 @@ export function Timeline(props: {
           </section>
         ))
       )}
-      {props.counts.unfetched > 0 && props.filter !== 'photo' && (
+      {props.counts.unfetched > 0 && (props.filter === 'all' || props.filter === 'note') && (
         <p className="small muted footnote">
           <IconAlert size={14} /> 連絡帳{props.counts.note}日分のうち{props.counts.unfetched}日は本文未取得です。連絡帳アプリで「さらに表示」を開いて保存したPDFを追加すると埋まります。
         </p>

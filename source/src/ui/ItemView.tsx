@@ -2,16 +2,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { KIND_LABELS, type AttachmentRef, type Item } from '../core/types.ts';
 import { bestVariant } from '../media.ts';
 import { getBlob } from '../db.ts';
-import { formatBytes, formatDate, formatDateTime, KindLabel, Modal, Thumb, useBlobUrl } from './common.tsx';
+import { formatBytes, formatDate, formatDateTime, GenreTag, KindLabel, Modal, Thumb, useBlobUrl } from './common.tsx';
 import { IconBack, IconChevron, IconClose, IconEdit, IconTrash } from './icons.tsx';
 
 export function ItemDetail(props: { item: Item; onEdit: () => void; onDelete: () => Promise<void>; onEvent: (ev: string) => void; onView: (atts: AttachmentRef[], index: number) => void }) {
   const it = props.item;
   const [confirm, setConfirm] = useState(false);
+  const saved = it.attachments.filter((a) => a.state !== 'missing');
   return (
     <div className="screen detail">
       <header className="detail-head">
-        <KindLabel kind={it.kind} />
+        {it.genre ? <GenreTag name={it.genre} /> : <KindLabel kind={it.kind} />}
         <h1 className="detail-title">{it.title || KIND_LABELS[it.kind]}</h1>
         <p className="muted">
           {formatDate(it.date)}
@@ -25,10 +26,10 @@ export function ItemDetail(props: { item: Item; onEdit: () => void; onDelete: ()
         )}
       </header>
 
-      {it.attachments.length > 0 && (
-        <section className={`gallery ${it.attachments.length === 1 ? 'gallery-one' : ''}`}>
-          {it.attachments.map((a, i) => (
-            <Thumb key={a.id} att={a} className={it.attachments.length === 1 ? 'thumb-l' : ''} onClick={() => props.onView(it.attachments, i)} />
+      {saved.length > 0 && (
+        <section className={`gallery ${saved.length === 1 ? 'gallery-one' : ''}`}>
+          {saved.map((a, i) => (
+            <Thumb key={a.id} att={a} className={saved.length === 1 ? 'thumb-l' : ''} onClick={() => props.onView(saved, i)} />
           ))}
         </section>
       )}
@@ -162,8 +163,12 @@ export function Photos(props: { items: Item[]; onView: (atts: AttachmentRef[], i
   const groups = useMemo(() => {
     const m = new Map<string, { item: Item; att: AttachmentRef; index: number }[]>();
     for (const it of props.items) {
-      if (it.kind !== kind) continue;
-      it.attachments.forEach((att, index) => {
+      const saved = it.attachments.filter((a) => a.state !== 'missing');
+      saved.forEach((att, index) => {
+        // 写真：写真の記録と、お知らせに付いていた写真。資料：チラシの記録と、お知らせの添付PDF
+        const isPhoto = it.kind === 'photo' || (it.kind !== 'flyer' && att.mime.startsWith('image/') && att.role === 'photo');
+        const isDoc = it.kind === 'flyer' || (it.kind !== 'photo' && att.role === 'document' && it.source.via === 'listpdf');
+        if (kind === 'photo' ? !isPhoto : !isDoc) return;
         const key = it.date.slice(0, 7);
         if (!m.has(key)) m.set(key, []);
         m.get(key)!.push({ item: it, att, index });
@@ -195,7 +200,7 @@ export function Photos(props: { items: Item[]; onView: (atts: AttachmentRef[], i
           </h2>
           <div className="photo-grid">
             {cells.map((c) => (
-              <Thumb key={c.att.id} att={c.att} onClick={() => props.onView(c.item.attachments, c.index, c.item)} />
+              <Thumb key={c.att.id} att={c.att} onClick={() => props.onView(c.item.attachments.filter((a) => a.state !== 'missing'), c.index, c.item)} />
             ))}
           </div>
         </section>

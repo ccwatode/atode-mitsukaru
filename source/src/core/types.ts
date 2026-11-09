@@ -175,6 +175,8 @@ export interface Item {
   createdAt: string;
   updatedAt: string;
   /* ---- v0.5 で追加（すべて省略可。旧版は無視する） ---- */
+  /** ジャンル（利用者がボタンで選ぶ。例：給食・園だより・活動記録） */
+  genre?: string;
   /** 保護者向けの区分（複数可） */
   purposes?: Purpose[];
   /** 元サービス側の区分 */

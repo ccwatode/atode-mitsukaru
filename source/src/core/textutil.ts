@@ -121,3 +121,11 @@ export function piecesToText(pieces: { str: string; x: number; y: number; h: num
   const text = lines.map((l) => l.parts.sort((a, b) => a.x - b.x).map((x) => x.s).join(' ').replace(/\s+/g, ' ').trim()).join('\n');
   return text.length > limit ? text.slice(0, limit) : text;
 }
+
+/**
+ * PDFの文字に混ざる「部首用の文字」（⽇ U+2F47 など。見た目は同じで別の文字）を、ふつうの漢字に直す。
+ * そのままだと検索や日付の読み取りに掛からない。全角の記号などは変えない。
+ */
+export function fixRadicals(s: string): string {
+  return s.replace(/[\u2E80-\u2FDF]/g, (c) => c.normalize('NFKC'));
+}

@@ -100,7 +100,9 @@ export function itemToDoc(it: Item): SearchDoc {
       { key: 'body', label: it.kind === 'photo' ? '説明' : '本文', text: it.body },
       { key: 'event', label: '行事', text: it.event },
       { key: 'searchText', label: '画像内の文字など', text: it.searchText },
-      { key: 'files', label: 'ファイル名', text: it.attachments.map((a) => a.name).join(' ') },
+      { key: 'files', label: 'ファイル名', text: it.attachments.map((a) => a.displayName ?? a.name).join(' ') },
+      { key: 'genre', label: 'ジャンル', text: it.genre ?? '' },
+      { key: 'attText', label: '添付PDFの文字', text: it.attachments.map((a) => a.text ?? '').filter(Boolean).join('\n') },
       { key: 'kind', label: '種類', text: KIND_LABELS[it.kind] },
     ],
   };

@@ -23,11 +23,23 @@ import { ItemDetail, Photos, Viewer } from './ItemView.tsx';
 import { Detail, PendingView } from './note.tsx';
 import { SearchView, type SearchState } from './SearchView.tsx';
 import { Timeline, type KindFilter } from './Timeline.tsx';
+import { assignImages, genreChoices, looksLikeOshiraseList, matchBySize, missingAttachments, parseOshiraseList, planPosts, type ListParseResult, type MissingRef, type PostPlan } from '../core/oshirase.ts';
+import { extractListPdf, type ListImage } from '../listpdf.ts';
+import { commitListImport, fillAttachment, type ListImportResult, type PostChoice } from '../listImport.ts';
+import { AskMatch, ListReview, MissingView, PostExtras } from './ListImport.tsx';
+
+interface ListJob {
+  fileName: string;
+  parsed: ListParseResult;
+  images: ListImage[];
+  assign: number[][];
+  plan: PostPlan[];
+}
 
 type Tab = 'home' | 'search' | 'calendar' | 'photos' | 'data';
 type View = {
   tab: Tab;
-  screen?: 'note' | 'item' | 'form' | 'pending' | 'event' | 'eventForm' | 'review';
+  screen?: 'note' | 'item' | 'form' | 'pending' | 'event' | 'eventForm' | 'review' | 'listReview' | 'missing';
   id?: string;
   draft?: Draft;
   autoPaste?: boolean;
@@ -77,7 +89,14 @@ export function App() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [updated, setUpdated] = useState(false);
+  const [listJob, setListJob] = useState<ListJob | null>(null);
+  const [listResult, setListResult] = useState<ListImportResult | null>(null);
+  const [ask, setAsk] = useState<{ file: File; candidates: MissingRef[] }[]>([]);
+  const fillTarget = useRef<MissingRef | null>(null);
   const inputs = {
+    listPdf: useRef<HTMLInputElement>(null),
+    fill: useRef<HTMLInputElement>(null),
+    fillOne: useRef<HTMLInputElement>(null),
     pdf: useRef<HTMLInputElement>(null),
     flyer: useRef<HTMLInputElement>(null),
     photo: useRef<HTMLInputElement>(null),
@@ -157,7 +176,12 @@ export function App() {
   const visibleEvents = useMemo(() => calEvents.filter((e) => !child || !e.childName || e.childName === child), [calEvents, child]);
   const notesShown = entries.filter((e) => e.note);
   const unfetched = notesShown.filter((e) => e.note!.fetchStatus === '未取得').length;
-  const attachmentCount = items.reduce((s, i) => s + i.attachments.length, 0);
+  const attachmentCount = items.reduce((s, i) => s + i.attachments.filter((a) => a.state !== 'missing').length, 0);
+  const missing = useMemo(() => missingAttachments(items), [items]);
+  const listCoverage = useMemo(() => {
+    const ds = items.filter((i) => i.source.via === 'listpdf').map((i) => i.date).sort();
+    return ds.length ? `取り込み済み：${formatDate(ds[0])}〜${formatDate(ds[ds.length - 1], false)}` : '';
+  }, [items]);
 
   const go = (v: View, replace = false) => setStack((s) => (replace ? [...s.slice(0, -1), v] : [...s, v]));
   const goTab = (tab: Tab) => setStack([{ tab }]);
@@ -326,7 +350,8 @@ export function App() {
 
   const choose = async (c: AddChoice) => {
     setSheet(false);
-    if (c === 'notePdf') inputs.pdf.current?.click();
+    if (c === 'listPdf') inputs.listPdf.current?.click();
+    else if (c === 'notePdf') inputs.pdf.current?.click();
     else if (c === 'flyer') inputs.flyer.current?.click();
     else if (c === 'photo') inputs.photo.current?.click();
     else if (c === 'memo') go({ tab: view.tab, screen: 'form', draft: newDraft('memo') });
@@ -359,6 +384,8 @@ export function App() {
 
   const saveItem = async (item: Item, newFiles: ProcessedFile[], removed: AttachmentRef[]) => {
     const prev = itemById.get(item.id);
+    // 途中までだった本文を自分で直したら、全文として扱う
+    if (prev?.bodyState === 'truncated' && item.body !== prev.body) item = { ...item, bodyState: 'full' };
     const stamped = (await withV5([prev ? { ...item, rev: (prev.rev ?? 1) + 1, updatedAt: new Date().toISOString() } : item], [])).items[0];
     await db.saveItem(stamped, newFiles.flatMap((f) => f.blobs));
     if (removed.length) await db.write([{ store: 'blobs', del: removed.flatMap((a) => a.variants.map((v) => `${a.id}:${v}`)) }]);
@@ -387,6 +414,109 @@ export function App() {
       await reload();
       if (out.length) setReports(out);
     }
+  };
+
+  /* ---------- お知らせ一覧のPDF ---------- */
+
+  const onListPdf = async (f?: File) => {
+    if (!f) return;
+    setError(null);
+    try {
+      if (!/\.pdf$/i.test(f.name) && f.type !== 'application/pdf') throw new Error(`${f.name} はPDFではありません`);
+      const { doc, images } = await extractListPdf(f, setBusy);
+      const parsed = parseOshiraseList(doc.pieces, doc.pageHeights);
+      if (!parsed.posts.length) {
+        throw new Error(looksLikeOshiraseList(doc.title, doc.pieces) ? '記事を読み取れませんでした。Safariの「共有 → オプション → PDF」で保存したPDFか確認してください' : 'お知らせ一覧のPDFではないようです。連絡帳のPDFは「連絡帳のPDF」から、園だよりなどは「チラシ・おたより」から追加してください');
+      }
+      const assign = assignImages(parsed.posts, images);
+      const current = await db.getItems();
+      setItems(current);
+      setListJob({ fileName: f.name, parsed, images, assign, plan: planPosts(parsed.posts, assign.map((a) => a.length), current) });
+      go({ tab: 'home', screen: 'listReview' });
+    } catch (e) {
+      setError(`取り込めませんでした：${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const commitList = async (choices: PostChoice[]) => {
+    if (!listJob) return;
+    setError(null);
+    try {
+      // 子ども・家族の情報は、名前ごとに1回だけ用意する（記事ごとに作ると同じ子どもが重複する）
+      const names = [...new Set(listJob.parsed.posts.filter((_, i) => choices[i].action === 'add').map((p) => p.childName))];
+      const now = new Date().toISOString();
+      const stubs = names.map((n, i): Item => ({ id: `stub${i}`, kind: 'notice', date: todayStr(), title: '', body: '', searchText: '', childName: n, event: '', attachments: [], source: { via: 'listpdf', fileNames: [] }, createdAt: now, updatedAt: now }));
+      const done = (await withV5(stubs, [])).items;
+      const byName = new Map(names.map((n, i) => [n, done[i]]));
+      const stamp = async (it: Item): Promise<Item> => {
+        const s = byName.get(it.childName);
+        return { ...it, childIds: s?.childIds ?? [], familyId: s?.familyId, createdBy: s?.createdBy, rev: 1 };
+      };
+      const res = await commitListImport({ ...listJob, posts: listJob.parsed.posts, choices, existing: itemById, stamp }, setBusy);
+      if (!(await db.storageInfo()).persisted) await db.requestPersist();
+      setListJob(null);
+      setFilter('all');
+      setStack([{ tab: 'home' }]);
+      setListResult(res);
+    } catch (e) {
+      setError(`保存できませんでした：${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+      await reload();
+    }
+  };
+
+  /** 保存したファイルを、大きさの合う「未保存の添付」に入れる。決められないものは1件ずつ聞く */
+  const onFillMany = async (list: File[]) => {
+    if (!list.length) return;
+    setError(null);
+    let filled = 0;
+    const queue: { file: File; candidates: MissingRef[] }[] = [];
+    try {
+      for (let i = 0; i < list.length; i++) {
+        setBusy(`添付を確認しています（${i + 1}/${list.length}）`);
+        const current = await db.getItems();
+        const cands = matchBySize(list[i].size, missingAttachments(current));
+        if (cands.length === 1) {
+          await fillAttachment(current.find((x) => x.id === cands[0].itemId)!, cands[0].attachmentId, list[i]);
+          filled++;
+        } else queue.push({ file: list[i], candidates: cands });
+      }
+    } catch (e) {
+      setError(`添付を保存できませんでした：${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+      await reload();
+    }
+    if (filled) setToast(`${filled}件の添付を記事に入れました`);
+    else if (!queue.length) setToast('追加できる添付はありませんでした');
+    setAsk(queue);
+  };
+
+  const fillOne = async (m: MissingRef, file: File) => {
+    setError(null);
+    try {
+      setBusy('添付を保存しています');
+      const current = await db.getItems();
+      const it = current.find((x) => x.id === m.itemId);
+      if (!it) throw new Error('記事が見つかりません');
+      await fillAttachment(it, m.attachmentId, file);
+      setToast(`「${m.displayName}」を保存しました`);
+    } catch (e) {
+      setError(`添付を保存できませんでした：${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+      await reload();
+    }
+  };
+
+  const setGenre = async (it: Item, genre: string) => {
+    const now = new Date().toISOString();
+    await db.saveItem({ ...it, genre, updatedAt: now, rev: (it.rev ?? 1) + 1 }, []);
+    await reload();
+    setToast(`ジャンルを「${genre}」にしました`);
   };
 
   /* ---------- 連絡帳の承認 ---------- */
@@ -481,6 +611,12 @@ export function App() {
           <span>新しいPDFとの違いを確認して、反映するか選んでください</span>
         </button>
       )}
+      {missing.length > 0 && (
+        <button className="notice notice-action" onClick={() => go({ tab: view.tab, screen: 'missing' })}>
+          <strong>添付ファイル {missing.length}件がまだ入っていません</strong>
+          <span>保存したPDFをまとめて選ぶと、元の記事に入ります</span>
+        </button>
+      )}
       {(records.length > 0 || items.length > 0) && (backupDays == null || backupDays > 30) && (
         <button className="notice notice-soft" onClick={() => goTab('data')}>
           <strong>{backupDays == null ? 'まだバックアップがありません' : `最後のバックアップから${backupDays}日`}</strong>
@@ -493,7 +629,24 @@ export function App() {
 
   let title = TAB_TITLE[view.tab];
   let content: ReactNode = null;
-  if (view.screen === 'pending') {
+  if (view.screen === 'listReview') {
+    title = 'お知らせの取り込み';
+    content = listJob ? (
+      <ListReview {...listJob} existing={items} onCommit={(c) => void commitList(c)} onCancel={() => (setListJob(null), back())} />
+    ) : (
+      <p className="empty">取り込むPDFを選び直してください。</p>
+    );
+  } else if (view.screen === 'missing') {
+    title = '添付の追加';
+    content = (
+      <MissingView
+        missing={missing}
+        onPickMany={() => inputs.fill.current?.click()}
+        onPickOne={(m) => ((fillTarget.current = m), inputs.fillOne.current?.click())}
+        onOpen={(id) => go({ tab: view.tab, screen: 'item', id })}
+      />
+    );
+  } else if (view.screen === 'pending') {
     title = '連絡帳の更新の確認';
     content = <PendingView pending={pending} current={recById} onApprove={approve} onReject={async (id) => (await db.deletePending(id), await reload(), setToast('反映しませんでした'))} />;
   } else if (view.screen === 'note') {
@@ -513,7 +666,7 @@ export function App() {
     );
   } else if (view.screen === 'item') {
     const it = itemById.get(view.id!);
-    title = it ? KIND_LABELS[it.kind] : '記録';
+    title = it ? it.genre || KIND_LABELS[it.kind] : '記録';
     content = it ? (
       <>
       <ItemDetail
@@ -531,6 +684,19 @@ export function App() {
         }}
         onView={(atts, index) => setViewer({ atts, index })}
       />
+      {it.kind !== 'photo' && (
+        <PostExtras
+          item={it}
+          choices={genreChoices({ title: it.title, body: it.body, hasPdf: it.attachments.some((a) => a.mime === 'application/pdf') }, items.filter((x) => x.id !== it.id))}
+          onGenre={(g) => void setGenre(it, g)}
+          onFill={(aid) => {
+            const a = it.attachments.find((x) => x.id === aid);
+            fillTarget.current = { itemId: it.id, attachmentId: aid, displayName: a?.displayName ?? '', displaySize: a?.displaySize ?? '' };
+            inputs.fillOne.current?.click();
+          }}
+          onEditBody={() => go({ tab: view.tab, screen: 'form', draft: { item: it, newFiles: [], isNew: false } })}
+        />
+      )}
       {it.kind !== 'photo' && (
         <SourceEvents linked={linkedEvents(it.id)} pendingCount={pendingCandidates(itemSource(it))} onExtract={() => openReview(itemSource(it))} onOpen={(e) => go({ tab: view.tab, screen: 'event', id: e.id })} />
       )}
@@ -724,9 +890,59 @@ export function App() {
           setError(`読み込めませんでした：${(e as Error).message}`);
         }
       })}
+      {fileInput('listPdf', 'application/pdf,.pdf', false, 'listpdf-input', (fs) => void onListPdf(fs[0]))}
+      {fileInput('fill', 'application/pdf,.pdf,image/*', true, 'fill-input', (fs) => void onFillMany(fs))}
+      {fileInput('fillOne', 'application/pdf,.pdf,image/*', false, 'fillone-input', (fs) => {
+        const m = fillTarget.current;
+        fillTarget.current = null;
+        if (m && fs[0]) void fillOne(m, fs[0]);
+      })}
       {fileInput('zip', 'application/zip,.zip', false, 'zip-input', (fs) => void onZipChosen(fs[0]))}
 
-      {sheet && <AddSheet onChoose={(c) => void choose(c)} onClose={() => setSheet(false)} />}
+      {sheet && <AddSheet onChoose={(c) => void choose(c)} onClose={() => setSheet(false)} coverage={listCoverage} />}
+
+      {ask.length > 0 && !busy && (
+        <AskMatch
+          file={ask[0].file}
+          // 大きさの合う候補がなければ、未保存の添付すべてから選べるようにする
+          candidates={(ask[0].candidates.length ? ask[0].candidates : missing).map((m) => ({ ...m, ...(missing.find((x) => x.attachmentId === m.attachmentId) ?? {}) }))}
+          exact={ask[0].candidates.length > 0}
+          left={ask.length - 1}
+          onChoose={(m) => {
+            const cur = ask[0];
+            setAsk((q) => q.slice(1));
+            if (m) void fillOne(m, cur.file);
+          }}
+        />
+      )}
+
+      {listResult && (
+        <Modal title="取り込みが終わりました" onClose={() => setListResult(null)}>
+          <ul className="report">
+            <li>
+              新しく追加：<strong>{listResult.added}件</strong>
+              {listResult.updated > 0 && `／内容を更新：${listResult.updated}件`}
+            </li>
+            <li>写真：{listResult.photos}枚</li>
+            {listResult.missingPdfs > 0 && <li>添付ファイル：{listResult.missingPdfs}件は名前だけ入れました（中身はあとで追加）</li>}
+          </ul>
+          {listResult.failed.length > 0 && (
+            <p className="notice notice-warn small">
+              保存できなかった記事が{listResult.failed.length}件あります（{listResult.failed.slice(0, 2).join('、')}）。同じPDFをもう一度取り込むと、残りだけ追加されます。
+            </p>
+          )}
+          <div className="actions">
+            <button className="btn" onClick={() => setListResult(null)}>
+              閉じる
+            </button>
+            {listResult.missingPdfs > 0 && (
+              <button className="btn btn-primary" onClick={() => (setListResult(null), go({ tab: 'home', screen: 'missing' }))}>
+                添付を追加する
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {viewer && (
         <Viewer

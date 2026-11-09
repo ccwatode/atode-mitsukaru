@@ -1,1 +1,0 @@
-import{a,b,c,d,e,f,g}from"./chunk-FEO7XW3I.js";import"./chunk-XG6VQJ6R.js";export{e as exifDate,b as findDateInText,f as newId,g as piecesToText,d as titleFromFileName,c as titleFromText,a as todayStr};
